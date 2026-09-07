@@ -3,6 +3,13 @@
 //! An HDLL includes `hl.h` and links against libhl; this is the same thing in
 //! Rust, shared by every library in this repo that is one.
 //!
+//! # Portable names and ash's
+//!
+//! HashLink exports its runtime as `hl_*`. ash exports those, and also a set
+//! of `hlp_*` functions of its own, so a library reaching for an `hlp_` name
+//! runs on ash and nowhere else. Where both exist the doc comment says which
+//! to use.
+//!
 //! **This crate must never gain a dependency on `ash_std`, or define a symbol
 //! of its own.** Everything here is either a `#[repr(C)]` layout the runtime
 //! and a library must agree on, or a function the runtime exports, so a
@@ -103,6 +110,16 @@ pub unsafe fn hl_aptr<T>(a: *mut varray) -> *mut T {
 
 extern "C" {
     /// GC-allocated bytes, zeroed and scanned as data.
+    ///
+    /// **Use this one.** It is the name upstream HashLink exports, so a
+    /// library that allocates through it loads in any HashLink. The `hlp_`
+    /// spellings below are ash's, and a library using one runs only there.
+    pub fn hl_alloc_bytes(size: c_int) -> *mut vbyte;
+
+    /// The same, under ash's name.
+    ///
+    /// Prefer [`hl_alloc_bytes`]; this exists because the libraries that
+    /// shipped before the distinction was noticed use it.
     pub fn hlp_alloc_bytes(size: c_int) -> *mut vbyte;
     /// A GC-allocated array of `size` elements of type `at`.
     pub fn hlp_alloc_array(at: *mut hl_type, size: c_int) -> *mut varray;

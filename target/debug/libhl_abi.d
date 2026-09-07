@@ -1,0 +1,1 @@
+/private/tmp/claude-501/-Users-amaterasu-Vibranium-ash/f0554e5f-2fa9-4020-be48-02a8244824a8/scratchpad/split/hl_abi/target/debug/libhl_abi.rlib: /private/tmp/claude-501/-Users-amaterasu-Vibranium-ash/f0554e5f-2fa9-4020-be48-02a8244824a8/scratchpad/split/hl_abi/src/lib.rs
