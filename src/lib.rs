@@ -224,26 +224,85 @@ pub unsafe fn empty_array() -> *mut varray {
 /// from its cause.
 pub struct ProgramAllocator;
 
+/// What wasi-libc's `malloc` guarantees for every block it returns. A block
+/// aligned to at most this is an ordinary `malloc` block, as the program's
+/// own are. One aligned to more points inside a larger one, so only this
+/// allocator may free it: it is never handed to C's `free`, and no type of
+/// HashLink's ABI is aligned to more.
+const MALLOC_ALIGN: usize = 16;
+
 unsafe impl std::alloc::GlobalAlloc for ProgramAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        // wasi-libc's malloc aligns to 16, which covers every alignment Rust
-        // asks for here; anything stricter would need posix_memalign, and
-        // asking for it would be a silent mis-alignment rather than a
-        // refusal.
-        if layout.align() > 16 {
-            return std::ptr::null_mut();
+        if layout.align() <= MALLOC_ALIGN {
+            return malloc(layout.size()) as *mut u8;
         }
-        malloc(layout.size()) as *mut u8
+        // Over-aligned (a cache-padded counter asks for 64): take room for the
+        // slack and for the block's own address, and keep that address just
+        // below the pointer handed back, so `dealloc` can give it to `free`.
+        let word = std::mem::size_of::<usize>();
+        let Some(total) = layout.size().checked_add(layout.align() + word) else {
+            return std::ptr::null_mut();
+        };
+        let raw = malloc(total) as *mut u8;
+        if raw.is_null() {
+            return raw;
+        }
+        let aligned = ((raw as usize + word + layout.align() - 1) & !(layout.align() - 1)) as *mut u8;
+        unsafe { (aligned as *mut usize).sub(1).write(raw as usize) };
+        aligned
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: std::alloc::Layout) {
-        free(ptr as *mut c_void)
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        if layout.align() <= MALLOC_ALIGN {
+            free(ptr as *mut c_void)
+        } else {
+            free(unsafe { (ptr as *mut usize).sub(1).read() } as *mut c_void)
+        }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new: usize) -> *mut u8 {
-        if layout.align() > 16 {
-            return std::ptr::null_mut();
+        if layout.align() <= MALLOC_ALIGN {
+            return realloc(ptr as *mut c_void, new) as *mut u8;
         }
-        realloc(ptr as *mut c_void, new) as *mut u8
+        let new_layout = unsafe { std::alloc::Layout::from_size_align_unchecked(new, layout.align()) };
+        let fresh = unsafe { self.alloc(new_layout) };
+        if !fresh.is_null() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(ptr, fresh, layout.size().min(new));
+                self.dealloc(ptr, layout);
+            }
+        }
+        fresh
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProgramAllocator;
+    use std::alloc::{GlobalAlloc, Layout};
+
+    // Alignments below malloc's and above it. A type's size is a multiple
+    // of its alignment, so the sizes are too.
+    #[test]
+    fn every_alignment_is_honoured_and_kept_across_realloc() {
+        for align in [1, 8, 16, 32, 64, 4096] {
+            for size in [align, 3 * align, 16 * align] {
+                let layout = Layout::from_size_align(size, align).unwrap();
+                let block = unsafe { ProgramAllocator.alloc(layout) };
+                assert!(!block.is_null(), "{size} bytes at {align}");
+                assert_eq!(block as usize % align, 0, "{size} bytes at {align}");
+                for at in 0..size {
+                    unsafe { block.add(at).write(at as u8) };
+                }
+                let grown = unsafe { ProgramAllocator.realloc(block, layout, size * 3) };
+                assert!(!grown.is_null());
+                assert_eq!(grown as usize % align, 0, "grown at {align}");
+                for at in 0..size {
+                    assert_eq!(unsafe { grown.add(at).read() }, at as u8);
+                }
+                let grown_layout = Layout::from_size_align(size * 3, align).unwrap();
+                unsafe { ProgramAllocator.dealloc(grown, grown_layout) };
+            }
+        }
     }
 }
